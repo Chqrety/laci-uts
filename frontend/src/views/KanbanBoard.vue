@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, onActivated, computed } from 'vue'
 import {
   suratService,
   prokerService,
@@ -131,6 +131,11 @@ const {
 } = useKanbanDragDrop(suratList, statusColumns, executeStatusUpdate)
 
 onMounted(() => {
+  loadSurat()
+  loadProker()
+})
+
+onActivated(() => {
   loadSurat()
   loadProker()
 })

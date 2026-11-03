@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+
 import {
   suratService,
   getBackendAssetUrl,
@@ -7,7 +8,7 @@ import {
   type Surat,
 } from '@/services/api'
 import CardDetail from '@/components/molecules/CardDetail.vue'
-import SuratGeneratorModal from '@/components/organisms/SuratGeneratorModal.vue'
+import SuratGeneratorModal, { clearGeneratorCache } from '@/components/organisms/SuratGeneratorModal.vue'
 import TemplateSetupModal from '@/components/organisms/TemplateSetupModal.vue'
 import { ConfirmDialog } from '@/components/common'
 import { usePagination } from '@/composables/usePagination'
@@ -22,6 +23,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { toast } from '@/components/ui/toast'
+
 
 const suratList = ref<Surat[]>([])
 const isLoading = ref(false)
@@ -162,6 +164,7 @@ onMounted(fetchSurat)
 
       <!-- Button Group: Setup Template & Buat Surat -->
       <div class="flex items-center gap-2.5 shrink-0">
+
         <Button
           type="button"
           variant="outline"
@@ -483,6 +486,7 @@ onMounted(fetchSurat)
 
     <!-- Modal Generator Surat Otomatis -->
     <SuratGeneratorModal
+      v-if="isGeneratorModalOpen"
       :key="generatorKey"
       :is-open="isGeneratorModalOpen"
       @close="isGeneratorModalOpen = false"
@@ -492,9 +496,10 @@ onMounted(fetchSurat)
 
     <!-- Modal Setup Master Template GDrive -->
     <TemplateSetupModal
+      v-if="isSetupModalOpen"
       :is-open="isSetupModalOpen"
       @close="isSetupModalOpen = false"
-      @synced="generatorKey++"
+      @synced="clearGeneratorCache(); generatorKey++"
     />
 
     <!-- Modal Detail Component Integration -->

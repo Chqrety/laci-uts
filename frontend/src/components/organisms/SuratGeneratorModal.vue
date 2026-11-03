@@ -1,5 +1,22 @@
+<script lang="ts">
+// Module-level in-memory cache across modal toggles
+let cachedTemplates: SuratTemplate[] | null = null
+let cachedProkers: Proker[] | null = null
+let cachedUsers: User[] | null = null
+let cachedSettings: Record<string, string> | null = null
+let cachedInstansi: Instansi[] | null = null
+
+export const clearGeneratorCache = () => {
+  cachedTemplates = null
+  cachedProkers = null
+  cachedUsers = null
+  cachedSettings = null
+  cachedInstansi = null
+}
+</script>
+
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import {
   templateService,
   prokerService,
@@ -24,13 +41,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 import { Badge } from '@/components/ui/badge'
 import { toast } from '@/components/ui/toast'
 import { ROMAN_MONTHS, getCurrentRomanMonth } from '@/utils/roman'
@@ -40,6 +50,8 @@ import {
   GeneratorDynamicFields,
   STANDARD_COVERED,
 } from '@/components/surat-generator'
+import WheelTimePicker from '@/components/ui/time-picker/WheelTimePicker.vue'
+import SimpleDatePicker from '@/components/ui/date-picker/SimpleDatePicker.vue'
 
 const props = defineProps<{
   isOpen: boolean
@@ -54,6 +66,7 @@ const emit = defineEmits<{
 const templates = ref<SuratTemplate[]>([])
 const prokerList = ref<Proker[]>([])
 const userList = ref<User[]>([])
+const templatePlaceholders = ref<string[]>([])
 const isLoadingData = ref(false)
 const isSubmitting = ref(false)
 
@@ -95,18 +108,6 @@ const formattedWaktu = computed(() => {
   return `${jamMulai.value} WIB`
 })
 
-// UX Helper: Buka dialog picker kalender/jam otomatis saat field diklik,
-// sementara kursor/fokus tetap aktif sehingga bisa langsung diedit lewat keyboard
-const handlePickerClick = (e: MouseEvent) => {
-  try {
-    const el = (e.currentTarget || e.target) as HTMLInputElement
-    if (el && !el.disabled) {
-      el.showPicker?.()
-    }
-  } catch {
-    // Graceful fallback jika browser tidak support showPicker()
-  }
-}
 
 // 4. Narahubung (2 Input Terpisah)
 const namaNarahubung = ref('')
@@ -142,13 +143,7 @@ const ketumUser = computed(() => ketumOptions.value[0] || null)
 // Penandatangan Dasar (Ketua Pelaksana / Pembuat): Semua user kecuali Ketum
 const dasarUsers = computed(() => {
   const ketumId = selectedKetumId.value
-  return userList.value
-    .filter((u) => u.divisi?.toLowerCase() !== 'ketum' && u.id !== ketumId)
-    .sort((a, b) => {
-      const aIsDasar = ['dasar', 'pengurus', 'tupel'].includes(a.divisi?.toLowerCase() || '') ? 1 : 0
-      const bIsDasar = ['dasar', 'pengurus', 'tupel'].includes(b.divisi?.toLowerCase() || '') ? 1 : 0
-      return bIsDasar - aIsDasar
-    })
+  return userList.value.filter((u) => u.divisi?.toLowerCase() !== 'ketum' && u.id !== ketumId)
 })
 const lapis1Users = dasarUsers
 
@@ -198,20 +193,6 @@ const toggleCustomTujuan = () => {
   }
 }
 
-const displayInstansiOptions = computed(() => {
-  const list = [...instansiList.value]
-  if (selectedTujuan.value && !list.some((i) => i.nama_instansi === selectedTujuan.value)) {
-    list.unshift({
-      id: 'default-selected',
-      nama_instansi: selectedTujuan.value,
-      kategori: 'Default',
-      keterangan: '',
-      created_at: '',
-      updated_at: '',
-    })
-  }
-  return list
-})
 
 const computedFinalTujuan = computed(() => {
   if (isCustomTujuan.value) {
@@ -292,31 +273,58 @@ const computedFileName = computed(() => {
   return `${cleanTplName}_${prokerPart}_${dateStr}`
 })
 
-const templatePlaceholders = computed<string[]>(() => {
-  if (!selectedTemplate.value) return []
-  try {
-    const list = JSON.parse(selectedTemplate.value.placeholders)
-    return Array.isArray(list) ? list : []
-  } catch {
-    return []
-  }
-})
-
 // Placeholder ekstra yang belum ter-cover oleh form standar
 const extraPlaceholders = computed<string[]>(() => {
   return templatePlaceholders.value.filter((p) => !STANDARD_COVERED.has(p.toLowerCase()))
 })
 
-const loadData = async () => {
+const syncInitialSelection = () => {
+  const foundKetum = userList.value.find((u) => u.divisi?.toLowerCase() === 'ketum')
+  if (foundKetum && !selectedKetumId.value) {
+    selectedKetumId.value = foundKetum.id
+  }
+  const foundDasar = userList.value.find((u) => u.divisi?.toLowerCase() !== 'ketum' && (!foundKetum || u.id !== foundKetum.id))
+  if (foundDasar && !selectedKetupelId.value) {
+    selectedKetupelId.value = foundDasar.id
+  }
+  const templateExists = templates.value.some((t) => t.id === selectedTemplateId.value)
+  if (!templateExists && templates.value.length > 0 && templates.value[0]) {
+    selectedTemplateId.value = templates.value[0].id
+  }
+}
+
+const loadData = async (force = false) => {
+  if (!force && cachedTemplates && cachedTemplates.length > 0 && cachedProkers && cachedProkers.length > 0 && cachedUsers && cachedSettings && cachedInstansi) {
+    templates.value = cachedTemplates
+    prokerList.value = cachedProkers
+    userList.value = cachedUsers
+    instansiList.value = cachedInstansi
+    if (cachedSettings.default_output_folder_url) {
+      outputFolderUrl.value = cachedSettings.default_output_folder_url
+    }
+    syncInitialSelection()
+    return
+  }
+
   isLoadingData.value = true
   try {
     const [tplData, prokerData, usersData, settings, instansiData] = await Promise.all([
-      templateService.getAll(),
-      prokerService.getAll(),
-      userService.getAll().catch(() => [] as User[]),
-      templateService.getSettings().catch(() => ({} as Record<string, string>)),
-      instansiService.getAll().catch(() => [] as Instansi[]),
+      cachedTemplates && cachedTemplates.length > 0 && !force ? cachedTemplates : templateService.getAll(),
+      cachedProkers && cachedProkers.length > 0 && !force ? cachedProkers : prokerService.getAll(force),
+      cachedUsers && !force ? cachedUsers : userService.getAll().catch(() => [] as User[]),
+      cachedSettings && !force ? cachedSettings : templateService.getSettings().catch(() => ({} as Record<string, string>)),
+      cachedInstansi && !force ? cachedInstansi : instansiService.getAll().catch(() => [] as Instansi[]),
     ])
+
+    if (tplData && tplData.length > 0) {
+      cachedTemplates = tplData
+    }
+    if (prokerData && prokerData.length > 0) {
+      cachedProkers = prokerData
+    }
+    cachedUsers = usersData
+    cachedSettings = settings
+    cachedInstansi = instansiData
 
     templates.value = tplData
     prokerList.value = prokerData
@@ -327,33 +335,20 @@ const loadData = async () => {
       outputFolderUrl.value = settings.default_output_folder_url
     }
 
-    // Auto set Ketum jika ditemukan
-    const foundKetum = usersData.find((u) => u.divisi?.toLowerCase() === 'ketum')
-    if (foundKetum && !selectedKetumId.value) {
-      selectedKetumId.value = foundKetum.id
-    }
-
-    // Auto set Dasar jika ada user berdivisi dasar, pengurus, atau tupel
-    const foundDasar = usersData.find(
-      (u) =>
-        ['dasar', 'pengurus', 'tupel'].includes(u.divisi?.toLowerCase() || '') &&
-        (!foundKetum || u.id !== foundKetum.id)
-    )
-    if (foundDasar && !selectedKetupelId.value) {
-      selectedKetupelId.value = foundDasar.id
-    }
-
-    // Pastikan template terpilih valid di list baru
-    const templateExists = templates.value.some((t) => t.id === selectedTemplateId.value)
-    if (!templateExists && templates.value.length > 0 && templates.value[0]) {
-      selectedTemplateId.value = templates.value[0].id
-    }
+    syncInitialSelection()
   } catch (err) {
     console.error('Gagal memuat data generator surat:', err)
   } finally {
     isLoadingData.value = false
   }
 }
+
+onMounted(() => {
+  if (props.isOpen) {
+    generationResult.value = null
+    loadData()
+  }
+})
 
 watch(
   () => props.isOpen,
@@ -362,24 +357,30 @@ watch(
       generationResult.value = null
       loadData()
     }
-  }
+  },
+  { immediate: true }
 )
 
 // Saat template berubah, perbarui nomor urut dan perihal otomatis sesuai template yang dipilih
 watch(
   selectedTemplate,
   (tpl) => {
-    if (!tpl) return
+    if (!tpl) {
+      templatePlaceholders.value = []
+      return
+    }
     noUrut.value = extractPrefixNoUrut(tpl.nama_template)
     perihal.value = tpl.nama_template.replace(/^\d+[\s_-]*/, '').replace(/_/g, ' ').trim()
     const { tujuan, isCustom } = getSmartDefaultTujuan(tpl.nama_template)
     isCustomTujuan.value = isCustom
-    if (isCustom) {
-      selectedTujuan.value = ''
-      customTujuanInput.value = ''
-    } else {
-      selectedTujuan.value = tujuan
-      customTujuanInput.value = ''
+    selectedTujuan.value = isCustom ? '' : tujuan
+    customTujuanInput.value = ''
+
+    try {
+      const list = JSON.parse(tpl.placeholders)
+      templatePlaceholders.value = Array.isArray(list) ? list : []
+    } catch {
+      templatePlaceholders.value = []
     }
   },
   { immediate: true }
@@ -598,21 +599,24 @@ const handleFinish = () => {
 
           <!-- Pilihan Template -->
           <div class="space-y-1">
-            <Select v-model="selectedTemplateId">
-              <SelectTrigger size="lg" variant="white">
-                <SelectValue placeholder="Pilih jenis surat..." />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
+            <div class="relative w-full">
+              <select
+                v-model="selectedTemplateId"
+                class="w-full h-10 pl-3 pr-8 appearance-none text-xs rounded-xl bg-white border border-slate-200 text-slate-800 font-medium focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer shadow-2xs"
+              >
+                <option value="" disabled>Pilih jenis surat...</option>
+                <option
                   v-for="tpl in templates"
                   :key="tpl.id"
                   :value="tpl.id"
-                  class="text-xs cursor-pointer"
                 >
                   {{ tpl.nama_template }}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+                </option>
+              </select>
+              <svg class="w-3.5 h-3.5 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
+            </div>
           </div>
 
           <!-- Format Nomor Surat Terpisah-pisah -->
@@ -640,39 +644,39 @@ const handleFinish = () => {
 
               <span class="text-zinc-400 font-semibold text-xs select-none">/</span>
 
-              <!-- Pilihan Proker (Murni dari tabel proker atau Kosong) -->
-              <div class="min-w-[130px] flex-1">
-                <Select v-model="selectedProkerCode">
-                  <SelectTrigger size="sm">
-                    <SelectValue placeholder="Pilih Proker (atau Kosong)..." />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="NONE">Tanpa Proker (Kosong)</SelectItem>
-                    <SelectItem
-                      v-for="proker in prokerList"
-                      :key="proker.id"
-                      :value="proker.nama_proker.toUpperCase().replace(/\s+/g, '-')"
-                    >
-                      {{ proker.nama_proker }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+              <!-- Pilihan Proker (Native Select) -->
+              <div class="min-w-[130px] flex-1 relative">
+                <select
+                  v-model="selectedProkerCode"
+                  class="w-full h-8 pl-2.5 pr-7 appearance-none text-xs rounded-xl bg-zinc-50 border border-zinc-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer font-medium"
+                >
+                  <option value="NONE">Tanpa Proker (Kosong)</option>
+                  <option
+                    v-for="proker in prokerList"
+                    :key="proker.id"
+                    :value="proker.nama_proker.toUpperCase().replace(/\s+/g, '-')"
+                  >
+                    {{ proker.nama_proker }}
+                  </option>
+                </select>
+                <svg class="w-3 h-3 text-zinc-400 absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
               </div>
 
               <span class="text-zinc-400 font-semibold text-xs select-none">/</span>
 
-              <!-- Pilihan Bulan Romawi -->
+              <!-- Pilihan Bulan Romawi (Native Select, zero portal overhead) -->
               <div class="w-16">
-                <Select v-model="selectedBulan">
-                  <SelectTrigger size="sm" class="font-mono font-semibold">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem v-for="b in ROMAN_MONTHS" :key="b" :value="b">
-                      {{ b }}
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
+                <select
+                  v-model="selectedBulan"
+                  class="w-full h-8 px-1 appearance-none text-xs font-mono font-semibold text-center rounded-xl bg-zinc-50 border border-zinc-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer"
+                  title="Pilih Bulan Romawi"
+                >
+                  <option v-for="b in ROMAN_MONTHS" :key="b" :value="b">
+                    {{ b }}
+                  </option>
+                </select>
               </div>
 
               <span class="text-zinc-400 font-semibold text-xs select-none">/</span>
@@ -744,23 +748,29 @@ const handleFinish = () => {
             </div>
 
             <!-- Mode 1: Select dari Daftar Instansi -->
-            <div v-if="!isCustomTujuan">
-              <Select v-model="selectedTujuan">
-                <SelectTrigger size="sm" variant="white" class="h-9 text-xs rounded-xl">
-                  <SelectValue placeholder="Pilih instansi tujuan..." />
-                </SelectTrigger>
-                <SelectContent class="max-h-60">
-                  <SelectItem
-                    v-for="inst in displayInstansiOptions"
-                    :key="inst.id"
-                    :value="inst.nama_instansi"
-                    class="text-xs cursor-pointer"
-                  >
-                    <span class="font-medium">{{ inst.nama_instansi }}</span>
-                    <span class="text-[10px] text-slate-400 ml-1.5 font-normal">({{ inst.kategori }})</span>
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+            <div v-if="!isCustomTujuan" class="relative w-full">
+              <select
+                v-model="selectedTujuan"
+                class="w-full h-9 pl-3 pr-8 appearance-none text-xs rounded-xl bg-white border border-zinc-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer shadow-2xs"
+              >
+                <option value="" disabled>Pilih instansi tujuan...</option>
+                <option
+                  v-if="selectedTujuan && !instansiList.some((i) => i.nama_instansi === selectedTujuan)"
+                  :value="selectedTujuan"
+                >
+                  {{ selectedTujuan }} (Default)
+                </option>
+                <option
+                  v-for="inst in instansiList"
+                  :key="inst.id"
+                  :value="inst.nama_instansi"
+                >
+                  {{ inst.nama_instansi }} ({{ inst.kategori }})
+                </option>
+              </select>
+              <svg class="w-3.5 h-3.5 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+              </svg>
             </div>
 
             <!-- Mode 2: Input Manual Bebas -->
@@ -813,18 +823,16 @@ const handleFinish = () => {
                   :variant="tipeTanggal === 'range' ? 'default' : 'ghost'"
                   @click="tipeTanggal = 'range'"
                 >
-                  Rentang Hari (s.d.)
+                  Rentang Hari
                 </Button>
               </div>
             </div>
 
             <!-- Single Date Input -->
             <div v-if="tipeTanggal === 'single'" class="space-y-1">
-              <Input
+              <SimpleDatePicker
                 v-model="tanggalMulai"
-                type="date"
-                class="h-9 text-xs rounded-xl bg-white border-zinc-200 cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                @click="handlePickerClick"
+                placeholder="Pilih Tanggal Acara"
               />
             </div>
 
@@ -832,20 +840,17 @@ const handleFinish = () => {
             <div v-else class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div class="space-y-0.5">
                 <span class="text-[10px] text-slate-400">Tanggal Mulai:</span>
-                <Input
+                <SimpleDatePicker
                   v-model="tanggalMulai"
-                  type="date"
-                  class="h-9 text-xs rounded-xl bg-white border-zinc-200 cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                  @click="handlePickerClick"
+                  placeholder="Pilih Tanggal Mulai"
                 />
               </div>
               <div class="space-y-0.5">
                 <span class="text-[10px] text-slate-400">Tanggal Selesai:</span>
-                <Input
+                <SimpleDatePicker
                   v-model="tanggalSelesai"
-                  type="date"
-                  class="h-9 text-xs rounded-xl bg-white border-zinc-200 cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                  @click="handlePickerClick"
+                  :min="tanggalMulai"
+                  placeholder="Pilih Tanggal Selesai"
                 />
               </div>
             </div>
@@ -873,22 +878,17 @@ const handleFinish = () => {
               <div class="grid grid-cols-2 gap-3">
                 <div class="space-y-1">
                   <span class="text-[11px] text-slate-500 block">Jam Mulai</span>
-                  <Input
-                    type="time"
+                  <WheelTimePicker
                     v-model="jamMulai"
-                    class="h-9 text-xs rounded-xl bg-white border-zinc-200 cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                    @click="handlePickerClick"
+                    placeholder="Mulai (WIB)"
                   />
                 </div>
                 <div class="space-y-1">
                   <span class="text-[11px] text-slate-500 block">Jam Selesai</span>
-                  <Input
-                    type="time"
+                  <WheelTimePicker
                     v-model="jamSelesai"
                     :disabled="isSampaiSelesai"
-                    placeholder="Selesai"
-                    class="h-9 text-xs rounded-xl bg-white border-zinc-200 disabled:bg-slate-100 disabled:text-slate-400 cursor-pointer [&::-webkit-calendar-picker-indicator]:cursor-pointer"
-                    @click="handlePickerClick"
+                    placeholder="Selesai (WIB)"
                   />
                 </div>
               </div>
@@ -950,21 +950,24 @@ const handleFinish = () => {
                 <span>Ketua Umum</span>
                 <span v-if="ketumUser" class="text-[10px] text-emerald-600 font-semibold font-mono">(Terdeteksi)</span>
               </Label>
-              <Select v-model="selectedKetumId">
-                <SelectTrigger variant="white">
-                  <SelectValue placeholder="Pilih Ketua Umum..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
+              <div class="relative w-full">
+                <select
+                  v-model="selectedKetumId"
+                  class="w-full h-9 pl-3 pr-8 appearance-none text-xs rounded-xl bg-white border border-zinc-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer shadow-2xs"
+                >
+                  <option value="" disabled>Pilih Ketua Umum...</option>
+                  <option
                     v-for="u in ketumOptions"
                     :key="u.id"
                     :value="u.id"
-                    class="text-xs cursor-pointer"
                   >
                     {{ u.nama }} ({{ u.nim || u.username }})
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                  </option>
+                </select>
+                <svg class="w-3.5 h-3.5 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
 
             <!-- TTD 2: KETUA PELAKSANA / PEMBUAT (POSISI KANAN) -->
@@ -972,21 +975,24 @@ const handleFinish = () => {
               <Label class="text-xs font-medium text-slate-700">
                 Penandatangan Dasar
               </Label>
-              <Select v-model="selectedKetupelId">
-                <SelectTrigger variant="white">
-                  <SelectValue placeholder="Pilih Penandatangan Dasar..." />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem
+              <div class="relative w-full">
+                <select
+                  v-model="selectedKetupelId"
+                  class="w-full h-9 pl-3 pr-8 appearance-none text-xs rounded-xl bg-white border border-zinc-200 text-slate-800 focus:outline-none focus:ring-1 focus:ring-sky-500 cursor-pointer shadow-2xs"
+                >
+                  <option value="" disabled>Pilih Penandatangan Dasar...</option>
+                  <option
                     v-for="u in lapis1Users"
                     :key="u.id"
                     :value="u.id"
-                    class="text-xs cursor-pointer"
                   >
-                    {{ u.nama }} ({{ u.nim || u.username }}){{ ['dasar', 'pengurus', 'tupel'].includes(u.divisi?.toLowerCase() || '') ? ' • Dasar' : '' }}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
+                    {{ u.nama }} ({{ u.nim || u.username }})
+                  </option>
+                </select>
+                <svg class="w-3.5 h-3.5 text-zinc-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+                </svg>
+              </div>
             </div>
           </div>
         </div>
